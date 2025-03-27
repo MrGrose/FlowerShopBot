@@ -1,5 +1,5 @@
 from asgiref.sync import sync_to_async
-from bot.models import User, Category, Item, Order
+from bot.models import User, Category, Item, Order, Courier
 
 
 @sync_to_async
@@ -23,7 +23,7 @@ def get_item(item_id):
 
 
 @sync_to_async
-def create_order(user_id, item_id, name, address, date, time):
+def create_order(user_id, item_id, name, address, delivery_date, delivery_time):
     user = User.objects.get(tg_id=user_id)
     item = Item.objects.get(id=item_id)
     return Order.objects.create(
@@ -31,6 +31,11 @@ def create_order(user_id, item_id, name, address, date, time):
         item=item,
         name=name,
         address=address,
-        data=date,
-        delivery_time=time
+        delivery_date=delivery_date,
+        delivery_time=delivery_time
     )
+
+
+@sync_to_async
+def get_сourier():
+    return list(Courier.objects.all())

@@ -1,5 +1,5 @@
 from django.db import models
-from django.utils import timezone
+from datetime import date
 
 
 class User(models.Model):
@@ -50,7 +50,7 @@ class Order(models.Model):
     item = models.ForeignKey(Item, on_delete=models.SET_NULL, null=True)
     name = models.CharField(max_length=30, null=True)
     address = models.CharField(max_length=50, null=True)
-    data = models.DateField(default=timezone.now)
+    delivery_date = models.DateField(default=date.today)
     delivery_time = models.TimeField()
 
     def __str__(self):
