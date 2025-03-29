@@ -35,8 +35,8 @@ class FloristAdmin(admin.ModelAdmin):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ('id', 'name', 'address', 'data', 'delivery_time')
+    list_display = ('id', 'name', 'address', 'delivery_date', 'delivery_time')
     search_fields = ('name', 'address')
-    list_filter = ('data',)
-    ordering = ('-data',)
-    readonly_fields = ('data',)
+    list_filter = ('delivery_date',)
+    ordering = ('-delivery_date',)
+    readonly_fields = ('delivery_date',)
