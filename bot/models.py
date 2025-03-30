@@ -1,12 +1,12 @@
 import json
-from datetime import date
-
+from django.utils import timezone
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 
 class User(models.Model):
+    """Модель пользователя, представляющая его уникальный идентификатор в Telegram"""
     tg_id = models.BigIntegerField(unique=True)
 
     class Meta:
@@ -18,6 +18,7 @@ class User(models.Model):
 
 
 class Category(models.Model):
+    """Модель категории, представляющая разные категории событий"""
     name = models.CharField(max_length=100)
 
     class Meta:
@@ -29,6 +30,7 @@ class Category(models.Model):
 
 
 class Item(models.Model):
+    """Модель товара, представляющая букет с его свойствами"""
     name = models.CharField(max_length=30)
     description = models.TextField(max_length=120)
     price = models.FloatField()
@@ -53,6 +55,7 @@ class Item(models.Model):
 
 
 class Courier(models.Model):
+    """Модель курьера, представляющая информацию о курьере"""
     name = models.CharField(max_length=30)
     tg_id = models.BigIntegerField(unique=True)
     status = models.CharField(max_length=20, choices=[
@@ -75,6 +78,7 @@ class Courier(models.Model):
 
 
 class Florist(models.Model):
+    """Модель флориста, представляющая информацию о флористе"""
     name = models.CharField(max_length=30)
     tg_id = models.BigIntegerField(unique=True)
     status = models.CharField(max_length=20, choices=[
@@ -96,6 +100,7 @@ class Florist(models.Model):
 
 
 class Order(models.Model):
+    """Модель заказа, представляющая информацию о заказе товаров"""
     status = models.CharField(max_length=20, choices=[
         ("new", "Новый"),
         ("in_work", "В работе"),
@@ -107,7 +112,7 @@ class Order(models.Model):
     item = models.ForeignKey(Item, on_delete=models.SET_NULL, null=True)
     name = models.CharField(max_length=30, null=True)
     address = models.CharField(max_length=50, null=True)
-    delivery_date = models.DateField(default=date.today)
+    delivery_date = models.DateField(default=timezone.now)
     delivery_time = models.TimeField()
     created_at = models.DateTimeField(auto_now_add=True, null=True)
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -129,6 +134,7 @@ class Order(models.Model):
 
 
 class FSMData(models.Model):
+    """Модель для хранения данных конечного автомата состояния"""
     user_id = models.IntegerField(primary_key=True)
     state = models.CharField(max_length=255, blank=True, null=True)
     data = models.TextField(blank=True, null=True)
@@ -144,6 +150,7 @@ class FSMData(models.Model):
 
 
 class CourierAssignment(models.Model):
+    """Модель для задания курьеров к заказам"""
     courier = models.ForeignKey(Courier, on_delete=models.CASCADE)
     order = models.ForeignKey(Order, on_delete=models.CASCADE)
     assigned_at = models.DateTimeField(auto_now_add=True)
@@ -152,6 +159,7 @@ class CourierAssignment(models.Model):
 
 
 class FloristAssignment(models.Model):
+    """Модель для задания флористов к заказам"""
     florist = models.ForeignKey(Florist, on_delete=models.CASCADE)
     order = models.ForeignKey(Order, on_delete=models.CASCADE)
     assigned_at = models.DateTimeField(auto_now_add=True)
@@ -160,13 +168,19 @@ class FloristAssignment(models.Model):
 
 
 class Owner(models.Model):
+    """Модель владельца, представляющая владельца аккаунта"""
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     can_assign = models.BooleanField(default=True)
     can_view_stats = models.BooleanField(default=True)
 
+    class Meta:
+        verbose_name = "Владелец"
+        verbose_name_plural = "Владелецы"
+
 
 @receiver(post_save, sender=Order)
 def assign_courier(sender, instance, created, **kwargs):
+    """Автоматически назначает активного курьера на новый заказ"""
     if created:
         courier = Courier.objects.filter(status="active").first()
         if courier:
@@ -179,6 +193,7 @@ def assign_courier(sender, instance, created, **kwargs):
 
 
 class FloristCallback(models.Model):
+    """Модель для хранения информации о необходимости обратного звонка флористом"""
     florist = models.ForeignKey(
         "Florist",
         on_delete=models.CASCADE,
@@ -221,6 +236,7 @@ class FloristCallback(models.Model):
 
 
 class CourierDelivery(models.Model):
+    """Модель для хранения информации о доставке курьером"""
     courier = models.ForeignKey(
         "Courier",
         on_delete=models.CASCADE,
@@ -235,7 +251,8 @@ class CourierDelivery(models.Model):
     delivered_at = models.DateTimeField(
         null=True,
         blank=True,
-        verbose_name="Время доставки"
+        verbose_name="Время доставки",
+        default=timezone.now
     )
 
     class Meta:

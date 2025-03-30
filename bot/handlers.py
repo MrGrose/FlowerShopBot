@@ -1,4 +1,3 @@
-import datetime
 import json
 import logging
 import re
@@ -16,10 +15,11 @@ from aiogram.types import (CallbackQuery, ErrorEvent, FSInputFile,
                            PreCheckoutQuery)
 from asgiref.sync import sync_to_async
 from bot.keyboards import (confirm_phone_keyboard, create_courier_keyboard,
-                           create_florist_keyboard, filter_bouquets,
-                           for_another_reason, items)
+                           create_florist_keyboard, create_pagination_buttons,
+                           filter_bouquets, for_another_reason, items)
 from bot.models import CourierDelivery, Florist, FloristCallback, FSMData, Item
 from bot.requests import get_all_items, get_category_item
+from django.utils import timezone
 from environs import Env
 
 logging.basicConfig(
@@ -33,6 +33,7 @@ ITEMS_PER_PAGE = 3
 
 
 class OrderState(StatesGroup):
+    """Состояния для управления заказами."""
     choosing_occasion = State()
     choosing_price = State()
     waiting_for_name = State()
@@ -42,42 +43,51 @@ class OrderState(StatesGroup):
     waiting_for_phone = State()
     confrim_for_phone = State()
     waiting_item_price = State()
-    waiting_consultation_1 = State()
+    waiting_consultation = State()
     viewing_all_items = State()
     current_page = State()
 
 
 @router.errors()
-async def error_handler(event: ErrorEvent):
+async def error_handler(event: ErrorEvent) -> None:
+    """Обрабатывает ошибки, возникающие во время выполнения запросов.
+
+    Args:
+        event (ErrorEvent): Событие ошибки, которое произошло.
+    """
     error = event.exception
-    logger.error(f"Произошла ошибка: {error}")
+    logger.error("Произошла ошибка: %s", error, exc_info=True)
 
     message = event.update.message
     if not message:
         return
-
     error_message = "❌ Произошла ошибка. Попробуйте снова позже."
+
     if isinstance(error, FileNotFoundError):
-        error_message = "❌ Файл не найден."
-    elif isinstance(error, ValueError):
-        error_message = "❌ Некорректный ввод данных."
-    elif isinstance(error, KeyError):
-        error_message = "❌ Ошибка состояния. Попробуйте снова."
+        error_message = "❌ Файл соглашения не найден."
+    elif isinstance(error, (ValueError, KeyError)):
+        error_message = "❌ Некорректные данные."
     elif isinstance(error, TimeoutError):
         error_message = "❌ Превышено время ожидания ответа от сервера."
     elif isinstance(error, TelegramAPIError):
         error_message = "❌ Ошибка Telegram API. Попробуйте позже."     
     try:
-        await message.answer(error_message)
+        await event.update.message.answer(error_message)
     except Exception as e:
-        logger.error(f"Ошибка при отправке сообщения: {e}")
+        logger.error("Ошибка отправки сообщения: %s", e)
 
 
-async def show_welcome_message(message: Message, state: FSMContext):
+async def show_welcome_message(message: Message) -> None:
+    """Отправляет приветственное сообщение пользователю.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await message.answer(
         "Привет! 👋 Добро пожаловать в магазин цветов 'FlowerShop'."
         "Закажите доставку праздничного букета, собранного специально для ваших любимых, "
-        "родных и коллег. Наш букет со смыслом станет главным подарком на вашем празднике!"
+        "родных и коллег.\nНаш букет со смыслом станет главным подарком на вашем празднике!"
         "Для продолжения работы с ботом необходимо дать согласие на обработку персональных данных."
     )
 
@@ -98,32 +108,52 @@ async def show_welcome_message(message: Message, state: FSMContext):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    """Обрабатывает команду `/start`.
+
+    Обрабатывает также восстанавливает состояние после остановки.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await rq.set_user(message.from_user.id)
     fsm_data = await sync_to_async(
         FSMData.objects.filter(user_id=message.from_user.id).first)()
 
     if fsm_data and fsm_data.state:
         await message.answer(
-            "Обнаружен незавершенный диалог. Хотите продолжить или начать заново?",
+            "Обнаружен незавершенный диалог. Продолжить?",
             reply_markup=kb.choice_continue_or_restart()
         )
     else:
-        await show_welcome_message(message, state)
+        await show_welcome_message(message)
 
 
 @router.callback_query(F.data == "restart")
-async def restart_dialog(callback: CallbackQuery, state: FSMContext):
+async def restart_dialog(callback: CallbackQuery, state: FSMContext) -> None:
+    """Перезапускает диалог, очищая состояние и отправляя приветственное сообщение.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await state.clear()
-    await show_welcome_message(callback.message, state)
+    await show_welcome_message(callback.message)
 
 
 @router.callback_query(F.data == "continue")
-async def continue_dialog(callback: CallbackQuery, state: FSMContext):
+async def continue_dialog(callback: CallbackQuery, state: FSMContext) -> None:
+    """Восстановление на предыдущий диалог.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     fsm_data = await sync_to_async(
         FSMData.objects.filter(user_id=callback.from_user.id).first)()
 
     if not fsm_data:
-        await callback.message.answer("Нет сохраненных данных для продолжения.")
+        await callback.message.answer("❌ Нет данных для продолжения.")
         await state.clear()
         return
 
@@ -142,20 +172,22 @@ async def continue_dialog(callback: CallbackQuery, state: FSMContext):
             "Давайте подберем букет.\n"
             "К какому событию готовимся? Выберите один из вариантов, либо укажите свой",
             reply_markup=await kb.categories())
+
     elif current_state == OrderState.choosing_price.state:
         await callback.message.answer(
             "На какую сумму рассчитываете?",
             reply_markup=await kb.price())
+
     elif current_state == OrderState.waiting_for_name.state:
-        await callback.message.answer("Пожалуйста, введите имя получателя:")
+        await callback.message.answer("Введите имя получателя:")
     elif current_state == OrderState.waiting_for_address.state:
-        await callback.message.answer("Пожалуйста, введите адрес доставки:")
+        await callback.message.answer("Введите адрес доставки:")
     elif current_state == OrderState.waiting_for_date.state:
-        await callback.message.answer("Пожалуйста, введите дату доставки:")
+        await callback.message.answer("Введите дату доставки (ГГГГ-ММ-ДД):")
     elif current_state == OrderState.waiting_for_time.state:
-        await callback.message.answer("Пожалуйста, введите время доставки:")
+        await callback.message.answer("Введите время доставки (ЧЧ:ММ):")
     elif current_state == OrderState.waiting_for_phone.state:
-        await callback.message.answer("Пожалуйста, введите номер телефона:")
+        await callback.message.answer("Введите номер телефона:")
     elif current_state == OrderState.confrim_for_phone.state:
         phone = data.get('phone', 'Не указан')
         await callback.message.answer(
@@ -165,7 +197,7 @@ async def continue_dialog(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(
             "На какую сумму рассчитываете?",
             reply_markup=await kb.price())
-    elif current_state == OrderState.waiting_consultation_1.state:
+    elif current_state == OrderState.waiting_consultation.state:
         await callback.message.answer(
             "Заказать консультацию",
             reply_markup=kb.continue_consult)
@@ -181,30 +213,34 @@ async def continue_dialog(callback: CallbackQuery, state: FSMContext):
         await catalog(callback.message, state)   
 
 
-# Вынос отдельно в папку2
-async def save_fsm_data(user_id: int, state: FSMContext):
+async def save_fsm_data(user_id: int, state: FSMContext) -> None:
+    """Сохраняет состояние FSM в базу данных.
+
+    Args:
+        user_id (int): Telegram ID пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     current_state = await state.get_state()
     data = await state.get_data()
-    logger.info(f"Сохраняемые данные: {data}")
     serialized_data = {}
 
     for key, value in data.items():
         if isinstance(value, (date, time)):
             serialized_data[key] = value.isoformat()
-        elif isinstance(value, list):  # Если это список объектов Django ORM
+        elif isinstance(value, list):
             serialized_data[key] = [
                 {
-                    "id": item.id,
-                    "name": item.name,
-                    "price": float(item.price)
+                    "id": getattr(item, 'id', None),
+                    "name": getattr(item, 'name', None),
+                    "price": float(getattr(item, 'price', 0.0)) if isinstance(getattr(item, 'price', None), (int, float)) else 0.0
                 }
                 for item in value
             ]
-        elif hasattr(value, "_state"):  # Если это объект Django ORM
+        elif isinstance(value, dict):
             serialized_data[key] = {
-                "id": value.id,
-                "name": value.name,
-                "price": float(value.price)
+                "id": value.get('id', None),
+                "name": value.get('name', None),
+                "price": float(value.get('price', 0.0)) if isinstance(value.get('price'), (int, float)) else 0.0
             }
         else:
             serialized_data[key] = value
@@ -218,8 +254,13 @@ async def save_fsm_data(user_id: int, state: FSMContext):
     )
 
 
-# Вынос отдельно в папку2
-async def load_fsm_data(user_id: int, state: FSMContext):
+async def load_fsm_data(user_id: int, state: FSMContext) -> None:
+    """Загружает состояние FSM из базы данных.
+
+    Args:
+        user_id (int): Telegram ID пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     fsm_data = await sync_to_async(
         FSMData.objects.filter(user_id=user_id).first
     )()
@@ -245,37 +286,69 @@ async def load_fsm_data(user_id: int, state: FSMContext):
             await state.set_data({})
 
 
-async def reconstruct_item(item_dict: dict):
+async def reconstruct_item(item_dict: dict) -> Item:
+    """Восстанавливает объект товара по его словарному представлению.
+
+    Args:
+        item_dict (dict): Словарь с информацией о товаре.
+
+    Returns:
+        Item: Объект товара из базы данных.
+    """
     item = await sync_to_async(Item.objects.get)(pk=item_dict['id'])
+    print(f"[item] {item}")
+    print(f"[type(item)] {type(item)}")
     return item
 
 
 @router.callback_query(F.data == "to_main")
-async def to_main(callback: CallbackQuery, state: FSMContext):
+async def to_main(callback: CallbackQuery, state: FSMContext) -> None:
+    """Возвращает пользователя в главный каталог.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await state.clear()
     await callback.message.answer("Возврат в каталог.", reply_markup=kb.main_menu)
 
 
 @router.message(F.text == "Принять")
-async def event_form(message: Message, state: FSMContext):
+async def event_form(message: Message, state: FSMContext) -> None:
+    """Обрабатывает нажатие кнопки 'Принять' пользователем.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
-    await message.answer(
-        "Спасибо! Вы приняли условия обработки персональных данных. "
-    )
+    await message.answer("✅ Соглашение принято!")
     await catalog(message, state)
 
 
 @router.message(F.text == "Отказаться")
-async def not_event_form(message: Message, state: FSMContext):
+async def not_event_form(message: Message, state: FSMContext) -> None:
+    """Обрабатывает нажатие кнопки 'Отказаться' пользователем.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await message.answer(
         "Вы отказались от обработки персональных данных. "
         "Чтобы начать заново, используйте команду /start.")
 
-    await state.clear()  # завершение состояния и возврат к /start
+    await state.clear()
 
 
 @router.message(F.text == "Каталог")
-async def catalog(message: Message, state: FSMContext):
+async def catalog(message: Message, state: FSMContext) -> None:
+    """Показ категорий букетов.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
     await state.set_state(OrderState.choosing_occasion)
     await message.answer(
@@ -286,7 +359,13 @@ async def catalog(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("category_"),
                        OrderState.choosing_occasion)
-async def choose_occasion(callback: CallbackQuery, state: FSMContext):
+async def choose_occasion(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор события для букета.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     occasion = callback.data.split("_")[1]
     await state.update_data(occasion=occasion)
 
@@ -300,28 +379,44 @@ async def choose_occasion(callback: CallbackQuery, state: FSMContext):
     await save_fsm_data(callback.from_user.id, state)
 
 
-async def handle_no_reason(callback: CallbackQuery, state: FSMContext):
+async def handle_no_reason(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает случай, когда пользователь не выбрал конкретное событие.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     all_items = await get_all_items()
     if not all_items:
         await callback.message.answer("Доступных букетов нет")
         return
 
     await state.set_state(OrderState.viewing_all_items)
-    await state.update_data(filtered_items=all_items)    # Сохраняем все букеты в состояние
-    await state.update_data(current_page=1)              # Инициализируем текущую страницу
+    await state.update_data(filtered_items=all_items)
+    await state.update_data(current_page=1)
     await display_bouquets(callback, state)
     await save_fsm_data(callback.from_user.id, state)
 
 
-# Блок для выноса в п.1
-async def handle_another_reason(callback: CallbackQuery, state: FSMContext):
+async def handle_another_reason(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает случай, когда пользователь выбирает консультацию.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await callback.message.answer("Выберите доступный вариант:", reply_markup=for_another_reason())
-    await state.set_state(OrderState.waiting_consultation_1)
+    await state.set_state(OrderState.waiting_consultation)
     await save_fsm_data(callback.from_user.id, state)
 
 
-# Блок для выноса в п.1
-async def handle_regular_reason(callback: CallbackQuery, state: FSMContext):
+async def handle_regular_reason(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает обычный случай выбора события.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await state.set_state(OrderState.choosing_price)
     await callback.message.answer(
         "На какую сумму рассчитываете?",
@@ -332,7 +427,13 @@ async def handle_regular_reason(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("price_"), OrderState.choosing_price)
-async def choose_price(callback: CallbackQuery, state: FSMContext):
+async def choose_price(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор цены для букета.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     price = callback.data.split("_")[1]
     await state.update_data(price=price)
     data = await state.get_data()
@@ -343,15 +444,21 @@ async def choose_price(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("К сожалению, подходящих букетов не найдено.")
         return
 
-    await state.set_state(OrderState.viewing_all_items)     # Переключаем в состояние просмотра
-    await state.update_data(filtered_items=filtered_items)  # Сохраняем отфильтрованные букеты
-    await state.update_data(current_page=1)                 # Начинаем с первой страницы
-    await display_bouquets(callback, state)                 # Отображаем букеты
+    await state.set_state(OrderState.viewing_all_items)
+    await state.update_data(filtered_items=filtered_items)
+    await state.update_data(current_page=1)
+    await display_bouquets(callback, state)
     await save_fsm_data(callback.from_user.id, state)
 
 
 @router.callback_query(F.data.startswith("item_"))
-async def category(callback: CallbackQuery, state: FSMContext):
+async def category(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает выбор товара.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     item_id = callback.data.split("_")[1]
     item_data = await rq.get_item(item_id)
 
@@ -388,10 +495,16 @@ async def category(callback: CallbackQuery, state: FSMContext):
         )
 
 
-async def display_bouquets(callback: CallbackQuery, state: FSMContext):
+async def display_bouquets(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отображение букетов с пагинацией.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     data = await state.get_data()
-    all_items = data.get("filtered_items")      # Получаем отфильтрованные элементы
-    current_page = data.get("current_page", 1)  # Получаем текущую страницу
+    all_items = data.get("filtered_items")
+    current_page = data.get("current_page", 1)
     if not all_items:
         await callback.message.answer("Нет доступных букетов.")
         return
@@ -406,14 +519,12 @@ async def display_bouquets(callback: CallbackQuery, state: FSMContext):
 
     keyboard = await items(items_on_page)
 
-    # Создаем кнопки "Назад" и "Вперед"
     total_pages = (len(all_items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     navigation_buttons = kb.create_pagination_buttons(
         current_page,
         total_pages
-    )   # клавиатуру с кнопками пагинации
+    )
 
-    # Добавляем информацию о текущей странице
     page_info = f"Страница {current_page} из {total_pages}"
     await callback.message.edit_text(
         f"Доступные букеты:\n{page_info}", 
@@ -421,11 +532,17 @@ async def display_bouquets(callback: CallbackQuery, state: FSMContext):
             inline_keyboard=(
                 keyboard.inline_keyboard + navigation_buttons.inline_keyboard)
             )
-        )   # Объединяем клавиатуры
+        )
 
 
 @router.callback_query(F.data.startswith("page_"), OrderState.viewing_all_items)
-async def navigate_pages(callback: CallbackQuery, state: FSMContext):
+async def navigate_pages(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает навигацию между страницами товаров.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     page = int(callback.data.split("_")[1])
     await state.update_data(current_page=page)
     await display_bouquets(callback, state)
@@ -433,14 +550,26 @@ async def navigate_pages(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(F.text == "Заказать букет")
-async def order(message: Message, state: FSMContext):
+async def order(message: Message, state: FSMContext) -> None:
+    """Начинает процесс заказа букета.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
     await message.answer("Введите имя получателя:")
     await state.set_state(OrderState.waiting_for_name)
 
 
 @router.message(OrderState.waiting_for_name)
-async def process_name(message: Message, state: FSMContext):
+async def process_name(message: Message, state: FSMContext) -> None:
+    """Обрабатывает введение имени получателя.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
     await state.update_data(name=message.text)
     await message.answer("Введите адрес доставки (например, г. Красноярск, ул. Сбоводы 5, кв.4):")
@@ -448,7 +577,13 @@ async def process_name(message: Message, state: FSMContext):
 
 
 @router.message(OrderState.waiting_for_address)
-async def process_address(message: Message, state: FSMContext):
+async def process_address(message: Message, state: FSMContext) -> None:
+    """Обрабатывает введение адреса доставки.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
     await state.update_data(address=message.text)
     await message.answer("Введите дату доставки (например, 2025-03-30):")
@@ -456,7 +591,13 @@ async def process_address(message: Message, state: FSMContext):
 
 
 @router.message(OrderState.waiting_for_date)
-async def process_date(message: Message, state: FSMContext):
+async def process_date(message: Message, state: FSMContext) -> None:
+    """Обрабатывает введение даты доставки.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
     if not message.text:
         await message.answer("Введите дату в формате ГГГГ-ММ-ДД:")
@@ -477,7 +618,14 @@ async def process_date(message: Message, state: FSMContext):
 
 
 @router.message(OrderState.waiting_for_time)
-async def process_time(message: Message, state: FSMContext, bot: Bot):
+async def process_time(message: Message, state: FSMContext, bot: Bot) -> None:
+    """Обрабатывает введение времени доставки.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+        bot (Bot): Экземпляр бота.
+    """
     await save_fsm_data(message.from_user.id, state)
     if not message.text:
         await message.answer("⌛ Введите время в формате ЧЧ:ММ (например, 14:00):")
@@ -504,52 +652,71 @@ async def process_time(message: Message, state: FSMContext, bot: Bot):
     await state.set_state(None)
 
 
-async def send_invoice(message: Message, bot: Bot, state: FSMContext):
+async def send_invoice(message: Message, bot: Bot, state: FSMContext) -> None:
+    """Отправляет счет-фактуру пользователю для оплаты.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        bot (Bot): Экземпляр бота.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
-    # InvalidTokenError
     env = Env()
     env.read_env()
-    pay_token = env.str("PAY_TG_TOKEN")
+    pay_token = env.str("PAY_TG_TOKEN", None)
+    if not pay_token:
+        raise ValueError("Не задан PAY_TG_TOKEN")
 
-    item_data = await state.get_data()
-    item_id = item_data.get('id', 0)
-    price = item_data.get('item_price', 0)
-    item_name = item_data.get('item_name', 'Букет')
+    data = await state.get_data()
 
-    delivery_price = 500
+    item = data.get("occasion")
+    if not item:
+        await message.answer("❌ Ошибка: товар не найден.")
+        return
+
+    prices = [
+        LabeledPrice(label="Букет", amount=int(data["item_price"] * 100)),
+        LabeledPrice(label="Доставка", amount=50000)
+    ]
+
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Оплата заказа",
-        description=f"Букет: {item_name}",
-        payload=f"order_{item_id}",
+        description=f"Букет: {data["item_name"]}",
+        payload=f"order_{data["item_name"]}",
         provider_token=pay_token,
         currency="rub",
-        prices=[
-            LabeledPrice(label="Стоимость букета", amount=price*100),
-            LabeledPrice(label="НДС", amount=-(int(price)/0.2)),
-            LabeledPrice(label="Стоимость доставки", amount=(delivery_price*100)),
-        ],
-        # TODO: Сделать вывод картинки товара при оплате
-        # photo_url="D:/FlowerShopBot/FlowerShopProject/media/image.webp",
+        prices=prices,
+        photo_url="https://cs11.pikabu.ru/post_img/2019/02/19/9/155058987464147624.jpg",
         photo_size=100,
         photo_width=800,
         photo_height=450,
         protect_content=True,
-        start_parameter="FlowerSh0pBot",
+        start_parameter="flower_shop",
         request_timeout=30,
     )
 
-
 @router.pre_checkout_query()
-async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: Bot):
+async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: Bot) -> None:
+    """Обрабатывает предварительный запрос на оплату.
+
+    Args:
+        pre_checkout_query (PreCheckoutQuery): Запрос на предварительную оплату.
+        bot (Bot): Экземпляр бота.
+    """
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 
 @router.message(F.successful_payment)
-async def process_successful_payment(message: Message, state: FSMContext):
+async def process_successful_payment(message: Message, state: FSMContext) -> None:
+    """Обрабатывает успешную оплату.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     user_data = await state.get_data()
     try:
-        # TimeoutError
         new_order = await rq.create_order(
             user_id=message.from_user.id,
             item_id=user_data["occasion"],
@@ -606,25 +773,42 @@ async def process_successful_payment(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("delivered_"))
-async def process_delivered(callback: CallbackQuery):
+async def process_delivered(callback: CallbackQuery) -> None:
+    """Обрабатывает пометку о доставке.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+    """
     courier_delivery_id = int(callback.data.split("_")[1])
     courier_delivery = await sync_to_async(CourierDelivery.objects.get)(id=courier_delivery_id)
     courier_delivery.delivered = True
-    courier_delivery.delivered_at = datetime.datetime.now()
+    courier_delivery.delivered_at = timezone.now()
     await sync_to_async(courier_delivery.save)()
     await callback.message.answer("✅ Отмечено как доставленный!")
 
 
 @router.message(F.text == "Заказать консультацию")
-async def consultation_1(message: Message, state: FSMContext):
-    await state.set_state(OrderState.waiting_consultation_1)
+async def consultation_1(message: Message, state: FSMContext) -> None:
+    """Начинает процесс заказа консультации.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
+    await state.set_state(OrderState.waiting_consultation)
     await save_fsm_data(message.from_user.id, state)
     await message.answer("Укажите номер телефона, и наш флорист перезвонит вам в течение 20 минут")
     await state.set_state(OrderState.waiting_for_phone)
 
 
 @router.message(OrderState.waiting_for_phone)
-async def consultation(message: Message, state: FSMContext):
+async def consultation(message: Message, state: FSMContext) -> None:
+    """Обрабатывает введение номера телефона для консультации.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
     phone = message.text.strip()
 
@@ -644,7 +828,13 @@ async def consultation(message: Message, state: FSMContext):
 
 
 @router.callback_query(F.data == 'confirm_phone', OrderState.confrim_for_phone)
-async def confirm_phone(callback: CallbackQuery, state: FSMContext):
+async def confirm_phone(callback: CallbackQuery, state: FSMContext) -> None:
+    """Подтверждает номер телефона пользователя.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     confirm_data = await state.get_data()
     phone = confirm_data.get('phone')   
 
@@ -681,7 +871,12 @@ async def confirm_phone(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("call_made_"))
-async def process_call_made(callback: CallbackQuery):
+async def process_call_made(callback: CallbackQuery) -> None:
+    """Обрабатывает пометку о том, что звонок сделан.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+    """
     florist_callback_id = int(callback.data.split("_")[2])
     florist_callback = await sync_to_async(FloristCallback.objects.get)(id=florist_callback_id)
     florist_callback.callback_made = True
@@ -690,8 +885,14 @@ async def process_call_made(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == 'edit_phone', OrderState.confrim_for_phone)
-async def edit_phone(callback: CallbackQuery, state: FSMContext):
-    await save_fsm_data(callback.from_user.id, state) 
+async def edit_phone(callback: CallbackQuery, state: FSMContext) -> None:
+    """Позволяет пользователю изменить введенный номер телефона.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
+    await save_fsm_data(callback.from_user.id, state)
     await state.update_data(phone=None)
     await callback.message.answer('Введите номер!')
     await state.set_state(OrderState.waiting_for_phone)
@@ -699,20 +900,96 @@ async def edit_phone(callback: CallbackQuery, state: FSMContext):
 
 
 @router.message(F.text == "Посмотреть всю коллекцию")
-async def collection(message: Message, state: FSMContext):
+async def collection(message: Message, state: FSMContext) -> None:
+    """Предлагает пользователю посмотреть всю коллекцию букетов с пагинацией.
+    Args:
+        message (Message): Сообщение от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
     await save_fsm_data(message.from_user.id, state)
     data = await state.get_data()
     occasion = data.get("occasion")
 
     all_items = await get_category_item(occasion)
 
-    if all_items:
-        keyboard = await items(all_items)
-        await message.answer("Все букеты по выбранному событию:", reply_markup=keyboard)
-    else:
+    if not all_items:
         await message.answer("Букетов по данному событию нет.")
+        return
+
+    await state.update_data(
+        filtered_items=all_items,
+        current_page=1
+    )
+
+    items_on_page = all_items[:3]
+    keyboard = await items(items_on_page)
+
+    if len(all_items) > 3:
+        total_pages = (len(all_items) + 2) // 3
+        navigation_buttons = create_pagination_buttons(1, total_pages)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=(
+                keyboard.inline_keyboard +
+                navigation_buttons.inline_keyboard
+            )
+        )
+
+    await message.answer(
+        "Все букеты по выбранному событию:",
+        reply_markup=keyboard
+    )
+
+
+@router.callback_query(F.data.startswith("page_"))
+async def handle_pagination(callback: CallbackQuery, state: FSMContext) -> None:
+    """Обрабатывает навигацию по страницам.
+
+    Args:
+        callback (CallbackQuery): Callback-запрос от пользователя.
+        state (FSMContext): Контекст состояния.
+    """
+    data = await state.get_data()
+    all_items = data.get("filtered_items")
+    current_page = data.get("current_page", 1)
+
+    if not all_items:
+        await callback.message.answer("Нет доступных букетов.")
+        return
+
+    if callback.data.startswith("page_"):
+        new_page = int(callback.data.split("_")[1])
+        await state.update_data(current_page=new_page)
+        current_page = new_page
+
+    start_index = (current_page - 1) * 3
+    end_index = start_index + 3
+    items_on_page = all_items[start_index:end_index]
+
+    if not items_on_page:
+        await callback.message.answer("Нет букетов на этой странице.")
+        return
+
+    keyboard = await items(items_on_page)
+    total_pages = (len(all_items) + 2) // 3
+    navigation_buttons = create_pagination_buttons(current_page, total_pages)
+
+    page_info = f"Страница {current_page} из {total_pages}"
+    await callback.message.edit_text(
+        f"{page_info}\nВсе букеты по выбранному событию:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=(
+                keyboard.inline_keyboard + 
+                navigation_buttons.inline_keyboard
+            )
+        )
+    )
 
 
 @router.message()
-async def unknown_message(message: Message):
+async def unknown_message(message: Message) -> None:
+    """Обрабатывает неизвестные сообщения от пользователя.
+
+    Args:
+        message (Message): Сообщение от пользователя.
+    """
     await message.answer("Неизвестная команда. Воспользуйтесь меню или командой /start", reply_markup=kb.main_menu)
