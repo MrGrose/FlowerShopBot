@@ -1,21 +1,19 @@
-import os
-import django
 import asyncio
-from aiogram import Bot, Dispatcher
-from environs import Env
-from bot.handlers import router
-
+import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "FlowerShopProject.settings")
+import django
 django.setup()
+
+from aiogram import Bot, Dispatcher
+from bot.handlers import router
+from django.conf import settings
 
 
 async def main():
-    env = Env()
-    env.read_env()
-    tg_token = env.str("TG_TOKEN1")
-    bot = Bot(token=tg_token)
+    bot = Bot(token=settings.TG_BOT_TOKEN)
     dp = Dispatcher()
+
     dp.include_router(router)
     await dp.start_polling(bot)
 
