@@ -142,6 +142,7 @@
     ALLOWED_HOSTS=ваша_настройка
     TG_BOT_TOKEN=ваш_токен
     PAY_TG_TOKEN=ваш_платежный_токен
+    ALLOWED_HOSTS=ваши_данные
     ```
 4. Настройте проект Django, указав необходимые параметры в файле `settings.py`.
     ```bash
@@ -154,6 +155,13 @@
     INSTALLED_APPS = [
         ....
     'your_name_apps',]
+
+    SECRET_KEY = env.str('SECRET_KEY')
+    TG_BOT_TOKEN = env.str('TG_BOT_TOKEN')
+    PAY_TG_TOKEN = env.str('PAY_TG_TOKEN')
+    SECRET_KEY = env.str('SECRET_KEY')
+    DEBUG = env.bool('DEBUG', default=False)
+    ALLOWED_HOSTS = env.list('ALLOWED_HOSTS')
     ```
 5. Создайте базу данных и примените миграции, создайте админ пользователя:
     ```bash
