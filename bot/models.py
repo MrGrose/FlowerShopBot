@@ -33,7 +33,7 @@ class Item(models.Model):
     """Модель товара, представляющая букет с его свойствами"""
     name = models.CharField(max_length=30)
     description = models.TextField(max_length=120)
-    price = models.FloatField()
+    price = models.DecimalField(max_digits=10, decimal_places=2)
     category = models.ForeignKey(
         Category,
         on_delete=models.SET_NULL,
@@ -48,10 +48,6 @@ class Item(models.Model):
 
     def __str__(self):
         return f"{self.name} — {self.price}₽"
-
-    @property
-    def photo_name(self):
-        return self.photo.name if self.photo else None
 
 
 class Courier(models.Model):
