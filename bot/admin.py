@@ -2,9 +2,19 @@ from django.contrib import admin
 from django.db.models import Avg, BooleanField, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 
-from .models import (Category, Courier, CourierAssignment, CourierDelivery,
-                     Florist, FloristAssignment, FloristCallback, Item, Order,
-                     Owner, User)
+from .models import (
+    Category,
+    Courier,
+    CourierAssignment,
+    CourierDelivery,
+    Florist,
+    FloristAssignment,
+    FloristCallback,
+    Item,
+    Order,
+    Owner,
+    User
+)
 
 
 class CourierAssignmentInline(admin.TabularInline):
