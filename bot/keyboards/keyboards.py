@@ -6,7 +6,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.requests import get_categories, get_category_item
+from bot.utils.requests import get_categories, get_category_item
 
 form_button = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="Принять")],

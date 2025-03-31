@@ -28,12 +28,12 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import IntegrityError
 from django.utils import timezone
 
-import bot.keyboards as kb
-import bot.requests as rq
+import bot.keyboards.keyboards as kb
+import bot.utils.requests as rq
 
 from bot.models import CourierDelivery, Florist, FloristCallback, FSMData, Item
-from bot.requests import get_all_items, get_category_item
-from bot.keyboards import (
+from bot.utils.requests import get_all_items, get_category_item
+from bot.keyboards.keyboards import (
     confirm_phone_keyboard,
     create_courier_keyboard,
     create_florist_keyboard,
@@ -108,9 +108,6 @@ async def error_handler(event: ErrorEvent) -> None:
 
     elif isinstance(error, ServerError):
         error_message = "❌ Ошибка на стороне сервера. Попробуйте позже."
-
-    # elif isinstance(error, RequestException):
-    #     error_message = "❌ Ошибка соединения. Проверьте интернет и попробуйте снова."
 
     elif isinstance(error, (ValueError, KeyError)):
         error_message = "❌ Некорректные данные."
@@ -846,99 +843,27 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
         message (Message): Сообщение от пользователя.
         state (FSMContext): Контекст состояния.
     """
-    # try:
-    #     user_data = await state.get_data()
-    #     new_order = await rq.create_order(
-    #         user_id=message.from_user.id,
-    #         item_id=user_data["occasion"],
-    #         name=user_data["name"],
-    #         address=user_data["address"],
-    #         delivery_date=user_data['delivery_date'].isoformat(),
-    #         delivery_time=user_data['delivery_time'].strftime('%H:%M')
-    #     )
-
-    #     client_message = (
-    #         f"Оплачено: {message.successful_payment.total_amount//100} "
-    #         f"{message.successful_payment.currency}\n"
-    #         f"✅ Заказ #{new_order.id} оформлен!\n"
-    #         f"▪ Имя: {new_order.name}\n"
-    #         f"▪ Адрес: {new_order.address}\n"
-    #         f"▪ Дата доставки: {user_data['delivery_date']}\n"
-    #         f"▪ Время: {user_data['delivery_time'].strftime('%H:%M')}\n"
-    #         "Заказ передан курьеру"
-    #     )
-    #     await message.answer(client_message)
-    #     try:
-    #         courier = await rq.get_courier()
-    #         if courier:
-    #             try:
-    #                 courier_delivery = await sync_to_async(
-    #                     CourierDelivery.objects.create)(
-    #                         courier=courier, order=new_order
-    #                     )
-
-    #                 courier_keyboard = create_courier_keyboard(courier_delivery.id)
-
-    #                 courier_message = (
-    #                     f">>>>{courier.name}\n"
-    #                     "🚨 Новый заказ!\n"
-    #                     f"🔢 Номер заказа: #{new_order.id}\n"
-    #                     f"📦 Адрес: {new_order.address}\n"
-    #                     f"📅 Дата: {user_data['delivery_date']}\n"
-    #                     f"⏰ Время: {user_data['delivery_time'].strftime('%H:%M')}\n"
-    #                     f"👤 Клиент: {new_order.name}\n"
-    #                 )
-    #                 try:
-    #                     await message.bot.send_message(
-    #                         chat_id=courier.tg_id,
-    #                         text=courier_message,
-    #                         reply_markup=courier_keyboard
-    #                     )
-    #                 except TelegramBadRequest as e:
-    #                     logger.error("Ошибка отправки сообщения курьеру: %s", e)
-
-    #             except IntegrityError as e:
-    #                 logger.error("Ошибка создания доставки: %s", e)
-    #                 await message.answer("❌ Ошибка при создании заказа.")
-    #                 return
-    #         else:
-    #             await message.answer("❌ Не удалось получить информацию о курьере.")
-
-    #     except IntegrityError as e:
-    #         logger.error(f"Ошибка создания доставки: {str(e)}")
-    #         await message.answer("❌ Ошибка при назначении курьера.")
-
-    #     await sync_to_async(FSMData.objects.filter(user_id=message.from_user.id).delete)()
-    #     await state.clear()
-
-    # except Exception as e:
-    #     logger.error(f"Ошибка обработки оплаты: {str(e)}")
-    #     await message.answer("❌ Ошибка при обработке заказа. Обратитесь в поддержку.")
-    """Обрабатывает успешную оплату."""
     try:
-        # Получаем данные из состояния
+
         user_data = await state.get_data()
-        
-        # Проверка обязательных полей
+
         required_fields = ["occasion", "name", "address", "delivery_date", "delivery_time"]
         for field in required_fields:
             if field not in user_data:
                 raise KeyError(f"Отсутствует обязательное поле: {field}")
 
-        # Преобразование даты и времени в строки
         delivery_date = (
             user_data["delivery_date"].isoformat() 
             if isinstance(user_data["delivery_date"], date)
             else str(user_data["delivery_date"])
         )
-        
+
         delivery_time = (
             user_data["delivery_time"].strftime("%H:%M")
             if isinstance(user_data["delivery_time"], time)
             else str(user_data["delivery_time"])
         )
 
-        # Создание заказа
         new_order = await rq.create_order(
             user_id=message.from_user.id,
             item_id=user_data["occasion"],
@@ -951,7 +876,6 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
         if not new_order or not hasattr(new_order, "id"):
             raise ValueError("Ошибка создания заказа")
 
-        # Формирование сообщения для клиента
         client_message = (
             f"Оплачено: {message.successful_payment.total_amount // 100} "
             f"{message.successful_payment.currency}\n"
@@ -965,14 +889,12 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
         await message.answer(client_message)
 
         try:
-            # Назначение курьера
             courier = await rq.get_courier()
             if not courier:
                 await message.answer("❌ Нет доступных курьеров.")
                 return
 
             try:
-                # Создание записи о доставке
                 courier_delivery = await sync_to_async(CourierDelivery.objects.create)(
                     courier=courier, 
                     order=new_order
@@ -982,7 +904,6 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
                 await message.answer("❌ Ошибка при создании заказа.")
                 return
 
-            # Отправка уведомления курьеру
             courier_keyboard = create_courier_keyboard(courier_delivery.id)
             courier_message = (
                 f">>>>{courier.name}\n"
@@ -993,7 +914,6 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
                 f"⏰ Время: {delivery_time}\n"
                 f"👤 Клиент: {new_order.name}\n"
             )
-            
             try:
                 await message.bot.send_message(
                     chat_id=courier.tg_id,
@@ -1007,7 +927,6 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
             logger.error("Ошибка назначения курьера: %s", e)
             await message.answer("❌ Ошибка при обработке заказа.")
 
-        # Очистка данных
         await sync_to_async(FSMData.objects.filter(
             user_id=message.from_user.id
         ).delete)()
@@ -1020,8 +939,9 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
         logger.error("Ошибка создания заказа: %s", e)
         await message.answer("❌ Ошибка при создании заказа.")
     except Exception as e:
-        logger.error("Неизвестная ошибка: %s", exc_info=True)
-        await message.answer("❌ Критическая ошибка. Обратитесь в поддержку.")
+        logger.error("Неизвестная ошибка: %s", e, exc_info=True)
+        await message.answer("❌ Ошибка. Обратитесь в поддержку.")
+
 
 @router.callback_query(F.data.startswith("delivered_"))
 async def process_delivered(callback: CallbackQuery) -> None:
@@ -1249,7 +1169,7 @@ async def handle_pagination(callback: CallbackQuery, state: FSMContext) -> None:
         f"{page_info}\nВсе букеты по выбранному событию:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=(
-                keyboard.inline_keyboard +
+                keyboard.inline_keyboard + 
                 navigation_buttons.inline_keyboard
             )
         )

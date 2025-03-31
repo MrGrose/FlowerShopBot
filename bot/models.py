@@ -47,7 +47,7 @@ class Item(models.Model):
         verbose_name_plural = "Букеты"
 
     def __str__(self):
-        return f"{self.name} — {self.price}₽"
+        return f"{self.name} — {self.price:.2f}₽"
 
 
 class Courier(models.Model):
