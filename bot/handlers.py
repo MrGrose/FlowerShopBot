@@ -214,27 +214,8 @@ async def continue_dialog(callback: CallbackQuery, state: FSMContext) -> None:
     else:
         await callback.message.answer("Продолжаем с каталога.")
         await catalog(callback.message, state)   
-    # state_messages = {
-    #     OrderState.choosing_occasion: "К какому событию готовимся?",
-    #     OrderState.choosing_price: "На какую сумму рассчитываете?",
-    #     OrderState.waiting_for_recipient_name: "Введите имя получателя:",
-    #     OrderState.waiting_for_address: "Введите адрес доставки:",
-    #     OrderState.waiting_for_date: "Введите дату доставки (ГГГГ-ММ-ДД):",
-    #     OrderState.waiting_for_time: "Введите время доставки (ЧЧ:ММ):",
-    #     OrderState.waiting_for_phone: "Введите номер телефона:",
-    #     OrderState.confirm_phone: f"Подтвердите номер: {data.get('phone', '')}",
-    # }
 
-    # if current_state in state_messages:
-    #     await callback.message.answer(
-    #         state_messages[current_state],
-    #         reply_markup=await kb.categories() if current_state == OrderState.choosing_occasion else None
-    #     )
-    # else:
-    #     await callback.message.answer("Продолжаем с каталога.")
-    #     await catalog(callback.message, state)
 
-# Вынос отдельно в папку2
 async def save_fsm_data(user_id: int, state: FSMContext) -> None:
     """Сохраняет состояние FSM в базу данных.
 
@@ -249,8 +230,8 @@ async def save_fsm_data(user_id: int, state: FSMContext) -> None:
     for key, value in data.items():
         if isinstance(value, (date, time)):
             serialized_data[key] = value.isoformat()
-        elif isinstance(value, Decimal):  # Добавляем проверку на Decimal
-            serialized_data[key] = float(value)  # Преобразуем в float
+        elif isinstance(value, Decimal):
+            serialized_data[key] = float(value)
         elif isinstance(value, list):
             serialized_data[key] = [
                 {
@@ -423,7 +404,6 @@ async def handle_no_reason(callback: CallbackQuery, state: FSMContext) -> None:
     await save_fsm_data(callback.from_user.id, state)
 
 
-# Блок для выноса в п.1
 async def handle_another_reason(callback: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает случай, когда пользователь выбирает консультацию.
 
@@ -436,7 +416,6 @@ async def handle_another_reason(callback: CallbackQuery, state: FSMContext) -> N
     await save_fsm_data(callback.from_user.id, state)
 
 
-# Блок для выноса в п.1
 async def handle_regular_reason(callback: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает обычный случай выбора события.
 
@@ -787,7 +766,6 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
         else:
             await message.answer("Не удалось получить информацию о курьере.")
 
-    # AttributeError
     except AttributeError as e:
         raise e
     await sync_to_async(FSMData.objects.filter(user_id=message.from_user.id).delete)()
