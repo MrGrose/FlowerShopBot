@@ -4,24 +4,44 @@ import re
 from datetime import date, time
 from decimal import Decimal
 
-import bot.keyboards as kb
-import bot.requests as rq
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramUnauthorizedError,
+)
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (CallbackQuery, ErrorEvent, FSInputFile,
-                           InlineKeyboardMarkup, LabeledPrice, Message,
-                           PreCheckoutQuery)
+from aiogram.types import (
+    CallbackQuery,
+    ErrorEvent,
+    FSInputFile,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery
+)
 from asgiref.sync import sync_to_async
-from bot.keyboards import (confirm_phone_keyboard, create_courier_keyboard,
-                           create_florist_keyboard, create_pagination_buttons,
-                           filter_bouquets, for_another_reason, items)
+
+from django.conf import settings
+from django.core.exceptions import ObjectDoesNotExist
+from django.db import IntegrityError
+from django.utils import timezone
+
+import bot.keyboards as kb
+import bot.requests as rq
+
 from bot.models import CourierDelivery, Florist, FloristCallback, FSMData, Item
 from bot.requests import get_all_items, get_category_item
-from django.conf import settings
-from django.utils import timezone
+from bot.keyboards import (
+    confirm_phone_keyboard,
+    create_courier_keyboard,
+    create_florist_keyboard,
+    create_pagination_buttons,
+    filter_bouquets,
+    for_another_reason,
+    items
+)
 
 
 logging.basicConfig(
@@ -33,6 +53,16 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 ITEMS_PER_PAGE = 3
+
+
+class ResponseFormatError(Exception):
+    """Ошибка формата данных"""
+    pass
+
+
+class ServerError(Exception):
+    """Ошибка сервера"""
+    pass
 
 
 class OrderState(StatesGroup):
@@ -64,16 +94,29 @@ async def error_handler(event: ErrorEvent) -> None:
     message = event.update.message
     if not message:
         return
-    error_message = "❌ Произошла ошибка. Попробуйте снова позже."
 
-    if isinstance(error, FileNotFoundError):
-        error_message = "❌ Файл соглашения не найден."
+    error_message = "❌ Произошла неизвестная ошибка. Пожалуйста, обратитесь к разработчикам."
+
+    if isinstance(error, TelegramBadRequest):
+        error_message = "❌ Ошибка: пользователь не найден. Проверьте данные и попробуйте снова."
+
+    elif isinstance(error, TelegramUnauthorizedError):
+        error_message = "❌ Ошибка: бот заблокирован пользователем."
+
+    elif isinstance(error, ResponseFormatError):
+        error_message = "❌ Ошибка формата данных. Проверьте корректность данных."
+
+    elif isinstance(error, ServerError):
+        error_message = "❌ Ошибка на стороне сервера. Попробуйте позже."
+
+    # elif isinstance(error, RequestException):
+    #     error_message = "❌ Ошибка соединения. Проверьте интернет и попробуйте снова."
+
     elif isinstance(error, (ValueError, KeyError)):
         error_message = "❌ Некорректные данные."
+
     elif isinstance(error, TimeoutError):
-        error_message = "❌ Превышено время ожидания ответа от сервера."
-    elif isinstance(error, TelegramAPIError):
-        error_message = "❌ Ошибка Telegram API. Попробуйте позже."     
+        error_message = "❌ Превышено время ожидания ответа."
     try:
         await event.update.message.answer(error_message)
     except Exception as e:
@@ -195,7 +238,7 @@ async def continue_dialog(callback: CallbackQuery, state: FSMContext) -> None:
         phone = data.get('phone', 'Не указан')
         await callback.message.answer(
             f"Подтвердите или измените номер телефона: {phone}",
-            reply_markup=kb.confirm_phone_keyboard())
+            reply_markup=await kb.confirm_phone_keyboard())
     elif current_state == OrderState.waiting_item_price.state:
         await callback.message.answer(
             "На какую сумму рассчитываете?",
@@ -203,12 +246,12 @@ async def continue_dialog(callback: CallbackQuery, state: FSMContext) -> None:
     elif current_state == OrderState.waiting_consultation.state:
         await callback.message.answer(
             "Заказать консультацию",
-            reply_markup=kb.continue_consult)
+            reply_markup=await kb.continue_consult)
     elif current_state == OrderState.viewing_all_items.state:
         await callback.message.answer(
             "Вы просматриваете все букеты. Хотите что-то еще более уникальное?\n"
             "Подберите другой букет из нашей коллекции или закажите консультацию флориста",
-            reply_markup=kb.for_another_reason()
+            reply_markup=await kb.for_another_reason()
         )
 
     else:
@@ -223,40 +266,50 @@ async def save_fsm_data(user_id: int, state: FSMContext) -> None:
         user_id (int): Telegram ID пользователя.
         state (FSMContext): Контекст состояния.
     """
-    current_state = await state.get_state()
-    data = await state.get_data()
-    serialized_data = {}
+    try:
+        current_state = await state.get_state()
+        data = await state.get_data()
+        serialized_data = {}
 
-    for key, value in data.items():
-        if isinstance(value, (date, time)):
-            serialized_data[key] = value.isoformat()
-        elif isinstance(value, Decimal):
-            serialized_data[key] = float(value)
-        elif isinstance(value, list):
-            serialized_data[key] = [
-                {
-                    "id": getattr(item, 'id', None),
-                    "name": getattr(item, 'name', None),
-                    "price": float(getattr(item, 'price', 0.0)) if isinstance(getattr(item, 'price', None), (int, float)) else 0.0
+        for key, value in data.items():
+            if isinstance(value, (date, time)):
+                serialized_data[key] = value.isoformat()
+            elif isinstance(value, Decimal):
+                serialized_data[key] = float(value)
+            elif isinstance(value, list):
+                serialized_data[key] = [
+                    {
+                        "id": getattr(item, 'id', None),
+                        "name": getattr(item, 'name', None),
+                        "price": float
+                        (getattr(item, 'price', 0.0)) if isinstance(
+                            getattr(item, 'price', None), (int, float)
+                        ) else 0.0
+                    }
+                    for item in value
+                ]
+            elif isinstance(value, dict):
+                serialized_data[key] = {
+                    "id": value.get('id', None),
+                    "name": value.get('name', None),
+                    "price": float(value.get(
+                        'price', 0.0)) if isinstance(
+                            value.get('price'), (int, float)
+                        ) else 0.0
                 }
-                for item in value
-            ]
-        elif isinstance(value, dict):
-            serialized_data[key] = {
-                "id": value.get('id', None),
-                "name": value.get('name', None),
-                "price": float(value.get('price', 0.0)) if isinstance(value.get('price'), (int, float)) else 0.0
-            }
-        else:
-            serialized_data[key] = value
+            else:
+                serialized_data[key] = value
 
-    await sync_to_async(FSMData.objects.update_or_create)(
-        user_id=user_id,
-        defaults={
-            'state': current_state,
-            'data': json.dumps(serialized_data, ensure_ascii=False)
-        }
-    )
+        await sync_to_async(FSMData.objects.update_or_create)(
+            user_id=user_id,
+            defaults={
+                'state': current_state,
+                'data': json.dumps(serialized_data, ensure_ascii=False)
+            }
+        )
+    except Exception as e:
+        logger.error(f"Ошибка сохранения состояния: {str(e)}")
+        raise
 
 
 async def load_fsm_data(user_id: int, state: FSMContext) -> None:
@@ -266,30 +319,38 @@ async def load_fsm_data(user_id: int, state: FSMContext) -> None:
         user_id (int): Telegram ID пользователя.
         state (FSMContext): Контекст состояния.
     """
-    fsm_data = await sync_to_async(
-        FSMData.objects.filter(user_id=user_id).first
-    )()
-    logger.info(f"Загружаемые данные из FSM: {fsm_data}")
-    if fsm_data:
-        await state.set_state(fsm_data.state)
+    try:
+        fsm_data = await sync_to_async(
+            FSMData.objects.filter(user_id=user_id).first
+        )()
+        logger.info(f"Загружаемые данные из FSM: {fsm_data}")
+        if fsm_data:
+            await state.set_state(fsm_data.state)
 
-        try:
-            data = json.loads(fsm_data.data)
+            try:
+                data = json.loads(fsm_data.data)
 
-            for key, value in data.items():
-                if isinstance(value, list) and key == 'filtered_items':
-                    data[key] = [
-                        await sync_to_async(Item.objects.get)(id=item_dict["id"])
-                        for item_dict in value
-                    ]
-                elif isinstance(value, dict) and "id" in value:
-                    data[key] = await sync_to_async(Item.objects.get)(id=value["id"])
-                elif isinstance(value, (int, float)):  # Преобразуем обратно в Decimal, если нужно
-                    data[key] = Decimal(str(value))
-            await state.set_data(data)
+                for key, value in data.items():
+                    if isinstance(value, list) and key == 'filtered_items':
+                        data[key] = [
+                            await sync_to_async(Item.objects.get)(id=item_dict["id"])
+                            for item_dict in value
+                        ]
+                    elif isinstance(value, dict) and "id" in value:
+                        data[key] = await sync_to_async(Item.objects.get)(id=value["id"])
+                    elif isinstance(value, (int, float)):
+                        data[key] = Decimal(str(value))
+                await state.set_data(data)
 
-        except (TypeError, json.JSONDecodeError):
-            await state.set_data({})
+            except (TypeError, json.JSONDecodeError) as e:
+                logger.error("Ошибка декодирования JSON: %s", str(e))
+                await state.set_data({})
+    except ObjectDoesNotExist as e:
+        logger.error("Объект не найден: %s", str(e))
+        await state.set_data({})
+    except Exception as e:
+        logger.error("Ошибка при загрузке данных: %s", str(e), exc_info=True)
+        raise
 
 
 async def reconstruct_item(item_dict: dict) -> Item:
@@ -301,10 +362,12 @@ async def reconstruct_item(item_dict: dict) -> Item:
     Returns:
         Item: Объект товара из базы данных.
     """
-    item = await sync_to_async(Item.objects.get)(pk=item_dict['id'])
-    print(f"[item] {item}")
-    print(f"[type(item)] {type(item)}")
-    return item
+    try:
+        item = await sync_to_async(Item.objects.get)(pk=item_dict['id'])
+        return item
+    except ObjectDoesNotExist:
+        logger.error("Товар с id=%s не существует", item_dict['id'])
+        raise ResponseFormatError("Некорректные данные товара")
 
 
 @router.callback_query(F.data == "to_main")
@@ -316,11 +379,14 @@ async def to_main(callback: CallbackQuery, state: FSMContext) -> None:
         state (FSMContext): Контекст состояния.
     """
     await state.clear()
-    await callback.message.answer("Возврат в каталог.", reply_markup=kb.main_menu)
+    await callback.message.answer(
+        "Возврат в каталог.",
+        reply_markup=kb.main_menu
+    )
 
 
 @router.message(F.text == "Принять")
-async def event_form(message: Message, state: FSMContext) -> None:  # accept_privacy
+async def event_form(message: Message, state: FSMContext) -> None:
     """Обрабатывает нажатие кнопки 'Принять' пользователем.
 
     Args:
@@ -344,7 +410,7 @@ async def not_event_form(message: Message, state: FSMContext) -> None:
         "Вы отказались от обработки персональных данных. "
         "Чтобы начать заново, используйте команду /start.")
 
-    await state.clear()  # завершение состояния и возврат к /start
+    await state.clear()
 
 
 @router.message(F.text == "Каталог")
@@ -359,12 +425,15 @@ async def catalog(message: Message, state: FSMContext) -> None:
     await state.set_state(OrderState.choosing_occasion)
     await message.answer(
         "Давайте подберем букет.\n"
-        "К какому событию готовимся? Выберите один из вариантов, либо укажите свой",
+        "К какому событию готовимся? "
+        "Выберите один из вариантов, либо укажите свой",
         reply_markup=await kb.categories())
 
 
-@router.callback_query(F.data.startswith("category_"),
-                       OrderState.choosing_occasion)
+@router.callback_query(
+    F.data.startswith("category_"),
+    OrderState.choosing_occasion,
+)
 async def choose_occasion(callback: CallbackQuery, state: FSMContext) -> None:
     """Обрабатывает выбор события для букета.
 
@@ -411,7 +480,10 @@ async def handle_another_reason(callback: CallbackQuery, state: FSMContext) -> N
         callback (CallbackQuery): Callback-запрос от пользователя.
         state (FSMContext): Контекст состояния.
     """
-    await callback.message.answer("Выберите доступный вариант:", reply_markup=for_another_reason())
+    await callback.message.answer(
+        "Выберите доступный вариант:",
+        reply_markup=for_another_reason()
+    )
     await state.set_state(OrderState.waiting_consultation)
     await save_fsm_data(callback.from_user.id, state)
 
@@ -465,40 +537,44 @@ async def category(callback: CallbackQuery, state: FSMContext) -> None:
         callback (CallbackQuery): Callback-запрос от пользователя.
         state (FSMContext): Контекст состояния.
     """
-    item_id = callback.data.split("_")[1]
-    item_data = await rq.get_item(item_id)
+    try:
+        item_id = callback.data.split("_")[1]
+        item_data = await rq.get_item(item_id)
 
-    await state.update_data(
-        item_price=item_data['price'],
-        item_photo=item_data['photo'],
-        item_name=item_data['name'],
-        occasion=item_data['category_id']
-    )
-
-    await save_fsm_data(callback.from_user.id, state)
-    await state.set_state(OrderState.waiting_item_price)
-
-    photo_path = f"media/{item_data['photo']}" if item_data['photo'] else None
-    if photo_path:
-        photo = FSInputFile(photo_path)
-    else:
-        await callback.message.answer("Фото букета недоступно.")
-
-    await callback.message.answer_photo(photo=photo)
-    await callback.answer(f"Вы выбрали товар {item_data['name']}")
-    await callback.message.answer(
-        f"*Букет:* {item_data['name']}\n"
-        f"*Описание:* {item_data['description']}\n"
-        f"*Цветочный состав:* {item_data['structure']}\n"
-        f"*Цена:* {item_data['price']}р.",
-        parse_mode="Markdown"
-    )
-    await callback.message.answer(
-        "*Хотите что-то еще более уникальное?*\n"
-        "*Подберите другой букет из нашей коллекции или закажите консультацию флориста*",
-        parse_mode="Markdown",
-        reply_markup=kb.menu
+        await state.update_data(
+            item_price=item_data['price'],
+            item_photo=item_data['photo'],
+            item_name=item_data['name'],
+            occasion=item_data['category_id']
         )
+
+        await save_fsm_data(callback.from_user.id, state)
+        await state.set_state(OrderState.waiting_item_price)
+
+        photo_path = f"media/{item_data['photo']}" if item_data['photo'] else None
+        if photo_path:
+            photo = FSInputFile(photo_path)
+        else:
+            await callback.message.answer("Фото букета недоступно.")
+
+        await callback.message.answer_photo(photo=photo)
+        await callback.answer(f"Вы выбрали товар {item_data['name']}")
+        await callback.message.answer(
+            f"*Букет:* {item_data['name']}\n"
+            f"*Описание:* {item_data['description']}\n"
+            f"*Цветочный состав:* {item_data['structure']}\n"
+            f"*Цена:* {item_data['price']}р.",
+            parse_mode="Markdown"
+        )
+        await callback.message.answer(
+            "*Хотите что-то еще более уникальное?*\n"
+            "*Подберите другой букет из нашей коллекции или закажите консультацию флориста*",
+            parse_mode="Markdown",
+            reply_markup=kb.menu
+            )
+    except Exception as e:
+        logger.error(f"Ошибка загрузки товара: {str(e)}")
+        await callback.answer("❌ Ошибка при загрузке данных, попробуйте позже.")
 
 
 async def display_bouquets(callback: CallbackQuery, state: FSMContext) -> None:
@@ -576,10 +652,18 @@ async def process_name(message: Message, state: FSMContext) -> None:
         message (Message): Сообщение от пользователя.
         state (FSMContext): Контекст состояния.
     """
+    name = message.text.strip()
+    if re.match(r'^[А-Яа-яA-Za-z]{2,}$', name):
+        await state.update_data(name=name)
+        await message.answer(
+            "📍 Укажите адрес, куда доставить букет "
+            "(например, г. Красноярск, ул. Ленина, д. 15):"
+        )
+        await state.set_state(OrderState.waiting_for_address)
+    else:
+        await message.answer("⚠️ Пожалуйста, введите корректное имя (только буквы, не менее 2 символов).")
+
     await save_fsm_data(message.from_user.id, state)
-    await state.update_data(name=message.text)
-    await message.answer("Введите адрес доставки (например, г. Красноярск, ул. Сбоводы 5, кв.4):")
-    await state.set_state(OrderState.waiting_for_address)
 
 
 @router.message(OrderState.waiting_for_address)
@@ -590,9 +674,44 @@ async def process_address(message: Message, state: FSMContext) -> None:
         message (Message): Сообщение от пользователя.
         state (FSMContext): Контекст состояния.
     """
-    await save_fsm_data(message.from_user.id, state)
-    await state.update_data(address=message.text)
-    await message.answer("Введите дату доставки (например, 2025-03-30):")
+
+    adress_pattern = re.compile(
+        r"^(г\.\s*[А-Яа-яЁё\- ]+,\s*"
+        r"(ул\.|улица|просп\.|проспект|пр-т)\s*[А-Яа-яЁё\- ]+,\s*"
+        r"(д\.|дом)\s*\d+[А-Яа-я]*(,\s*(кв\.|квартира)\s*\d+)?$)"
+    )
+
+    address = message.text.strip()
+    example_address = (
+        "Примеры корректных адресов:\n"
+        "• г. Москва, ул. Ленина, д. 15\n"
+        "• г. Санкт-Петербург, Невский проспект, дом 25/3, кв. 10"
+    )
+
+    errors = []
+
+    if not address.startswith("г. "):
+        errors.append("Адрес должен начинаться с указания города (г. Москва)")
+
+    if "ул." not in address and "улица" not in address:
+        errors.append("Укажите улицу (ул. Ленина или улица Ленина)")
+
+    if "д." not in address and "дом" not in address:
+        errors.append("Укажите номер дома (д. 10 или дом 15)")
+
+    if errors:
+        error_message = "❌ Обнаружены ошибки:\n" + "\n".join(f"- {e}" for e in errors)
+        await message.answer(f"{error_message}\n\n{example_address}")
+        return
+
+    if not adress_pattern.match(address):
+        await message.answer(
+            f"❌ Некорректный формат адреса.\n\n{example_address}"
+        )
+        return
+
+    await state.update_data(address=address)
+    await message.answer("✅ Адрес принят! Введите дату доставки (ГГГГ-ММ-ДД):")
     await state.set_state(OrderState.waiting_for_date)
 
 
@@ -604,23 +723,27 @@ async def process_date(message: Message, state: FSMContext) -> None:
         message (Message): Сообщение от пользователя.
         state (FSMContext): Контекст состояния.
     """
-    await save_fsm_data(message.from_user.id, state)
-    if not message.text:
-        await message.answer("Введите дату в формате ГГГГ-ММ-ДД:")
-        return
-
     try:
-        delivery_date = date.fromisoformat(message.text.strip())
-        if delivery_date < date.today():
-            await message.answer("❌ Дата не может быть в прошлом!")
+        await save_fsm_data(message.from_user.id, state)
+        if not message.text:
+            await message.answer("Введите дату в формате ГГГГ-ММ-ДД:")
             return
-    except ValueError:
-        await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД.")
-        return
 
-    await state.update_data(delivery_date=delivery_date)
-    await message.answer("Введите время доставки (например, 14:00):")
-    await state.set_state(OrderState.waiting_for_time)
+        try:
+            delivery_date = date.fromisoformat(message.text.strip())
+            if delivery_date < date.today():
+                await message.answer("❌ Дата не может быть в прошлом!")
+                return
+        except ValueError:
+            await message.answer("❌ Неверный формат даты. Используйте ГГГГ-ММ-ДД.")
+            return
+
+        await state.update_data(delivery_date=delivery_date)
+        await message.answer("Введите время доставки (например, 14:00):")
+        await state.set_state(OrderState.waiting_for_time)
+    except Exception as e:
+        logger.error(f"Ошибка обработки даты: {str(e)}")
+        await message.answer("❌ Ошибка при обработке даты!")
 
 
 @router.message(OrderState.waiting_for_time)
@@ -666,35 +789,42 @@ async def send_invoice(message: Message, bot: Bot, state: FSMContext) -> None:
         bot (Bot): Экземпляр бота.
         state (FSMContext): Контекст состояния.
     """
-    await save_fsm_data(message.from_user.id, state)
-    data = await state.get_data()
+    try:
+        await save_fsm_data(message.from_user.id, state)
+        data = await state.get_data()
 
-    item = data.get("occasion")
-    if not item:
-        await message.answer("❌ Ошибка: товар не найден.")
-        return
+        item = data.get("occasion")
+        if not item:
+            await message.answer("❌ Ошибка: товар не найден.")
+            return
 
-    prices = [
-        LabeledPrice(label="Букет", amount=int(data["item_price"] * 100)),
-        LabeledPrice(label="Доставка", amount=50000)
-    ]
+        prices = [
+            LabeledPrice(label="Букет", amount=int(data["item_price"] * 100)),
+            LabeledPrice(label="Доставка", amount=50000)
+        ]
 
-    await bot.send_invoice(
-        chat_id=message.chat.id,
-        title="Оплата заказа",
-        description=f"Букет: {data["item_name"]}",
-        payload=f"order_{data["item_name"]}",
-        provider_token=settings.PAY_TG_TOKEN,
-        currency="rub",
-        prices=prices,
-        photo_url="https://cs11.pikabu.ru/post_img/2019/02/19/9/155058987464147624.jpg",
-        photo_size=100,
-        photo_width=800,
-        photo_height=450,
-        protect_content=True,
-        start_parameter="flower_shop",
-        request_timeout=30,
-    )
+        await bot.send_invoice(
+            chat_id=message.chat.id,
+            title="Оплата заказа",
+            description=f"Букет: {data["item_name"]}",
+            payload=f"order_{data["item_name"]}",
+            provider_token=settings.PAY_TG_TOKEN,
+            currency="rub",
+            prices=prices,
+            photo_url="https://cs11.pikabu.ru/post_img/2019/02/19/9/155058987464147624.jpg",
+            photo_size=100,
+            photo_width=800,
+            photo_height=450,
+            protect_content=True,
+            start_parameter="flower_shop",
+            request_timeout=30,
+        )
+    except TelegramBadRequest as e:
+        logger.error("Ошибка Telegram API: %s", e)
+        await message.answer("❌ Ошибка платежной системы. Попробуйте позже.")
+    except Exception as e:
+        logger.error("Неизвестная ошибка: %s", e)
+        await message.answer("❌ Ошибка при создании платежа.")
 
 
 @router.pre_checkout_query()
@@ -716,61 +846,182 @@ async def process_successful_payment(message: Message, state: FSMContext) -> Non
         message (Message): Сообщение от пользователя.
         state (FSMContext): Контекст состояния.
     """
-    user_data = await state.get_data()
+    # try:
+    #     user_data = await state.get_data()
+    #     new_order = await rq.create_order(
+    #         user_id=message.from_user.id,
+    #         item_id=user_data["occasion"],
+    #         name=user_data["name"],
+    #         address=user_data["address"],
+    #         delivery_date=user_data['delivery_date'].isoformat(),
+    #         delivery_time=user_data['delivery_time'].strftime('%H:%M')
+    #     )
+
+    #     client_message = (
+    #         f"Оплачено: {message.successful_payment.total_amount//100} "
+    #         f"{message.successful_payment.currency}\n"
+    #         f"✅ Заказ #{new_order.id} оформлен!\n"
+    #         f"▪ Имя: {new_order.name}\n"
+    #         f"▪ Адрес: {new_order.address}\n"
+    #         f"▪ Дата доставки: {user_data['delivery_date']}\n"
+    #         f"▪ Время: {user_data['delivery_time'].strftime('%H:%M')}\n"
+    #         "Заказ передан курьеру"
+    #     )
+    #     await message.answer(client_message)
+    #     try:
+    #         courier = await rq.get_courier()
+    #         if courier:
+    #             try:
+    #                 courier_delivery = await sync_to_async(
+    #                     CourierDelivery.objects.create)(
+    #                         courier=courier, order=new_order
+    #                     )
+
+    #                 courier_keyboard = create_courier_keyboard(courier_delivery.id)
+
+    #                 courier_message = (
+    #                     f">>>>{courier.name}\n"
+    #                     "🚨 Новый заказ!\n"
+    #                     f"🔢 Номер заказа: #{new_order.id}\n"
+    #                     f"📦 Адрес: {new_order.address}\n"
+    #                     f"📅 Дата: {user_data['delivery_date']}\n"
+    #                     f"⏰ Время: {user_data['delivery_time'].strftime('%H:%M')}\n"
+    #                     f"👤 Клиент: {new_order.name}\n"
+    #                 )
+    #                 try:
+    #                     await message.bot.send_message(
+    #                         chat_id=courier.tg_id,
+    #                         text=courier_message,
+    #                         reply_markup=courier_keyboard
+    #                     )
+    #                 except TelegramBadRequest as e:
+    #                     logger.error("Ошибка отправки сообщения курьеру: %s", e)
+
+    #             except IntegrityError as e:
+    #                 logger.error("Ошибка создания доставки: %s", e)
+    #                 await message.answer("❌ Ошибка при создании заказа.")
+    #                 return
+    #         else:
+    #             await message.answer("❌ Не удалось получить информацию о курьере.")
+
+    #     except IntegrityError as e:
+    #         logger.error(f"Ошибка создания доставки: {str(e)}")
+    #         await message.answer("❌ Ошибка при назначении курьера.")
+
+    #     await sync_to_async(FSMData.objects.filter(user_id=message.from_user.id).delete)()
+    #     await state.clear()
+
+    # except Exception as e:
+    #     logger.error(f"Ошибка обработки оплаты: {str(e)}")
+    #     await message.answer("❌ Ошибка при обработке заказа. Обратитесь в поддержку.")
+    """Обрабатывает успешную оплату."""
     try:
+        # Получаем данные из состояния
+        user_data = await state.get_data()
+        
+        # Проверка обязательных полей
+        required_fields = ["occasion", "name", "address", "delivery_date", "delivery_time"]
+        for field in required_fields:
+            if field not in user_data:
+                raise KeyError(f"Отсутствует обязательное поле: {field}")
+
+        # Преобразование даты и времени в строки
+        delivery_date = (
+            user_data["delivery_date"].isoformat() 
+            if isinstance(user_data["delivery_date"], date)
+            else str(user_data["delivery_date"])
+        )
+        
+        delivery_time = (
+            user_data["delivery_time"].strftime("%H:%M")
+            if isinstance(user_data["delivery_time"], time)
+            else str(user_data["delivery_time"])
+        )
+
+        # Создание заказа
         new_order = await rq.create_order(
             user_id=message.from_user.id,
             item_id=user_data["occasion"],
             name=user_data["name"],
             address=user_data["address"],
-            delivery_date=user_data['delivery_date'].isoformat(),
-            delivery_time=user_data['delivery_time'].strftime('%H:%M')
+            delivery_date=delivery_date,
+            delivery_time=delivery_time
         )
 
+        if not new_order or not hasattr(new_order, "id"):
+            raise ValueError("Ошибка создания заказа")
+
+        # Формирование сообщения для клиента
         client_message = (
-            f"Оплачено: {message.successful_payment.total_amount//100} "
+            f"Оплачено: {message.successful_payment.total_amount // 100} "
             f"{message.successful_payment.currency}\n"
             f"✅ Заказ #{new_order.id} оформлен!\n"
             f"▪ Имя: {new_order.name}\n"
             f"▪ Адрес: {new_order.address}\n"
-            f"▪ Дата доставки: {user_data['delivery_date']}\n"
-            f"▪ Время: {user_data['delivery_time'].strftime('%H:%M')}\n"
+            f"▪ Дата доставки: {delivery_date}\n"
+            f"▪ Время: {delivery_time}\n"
             "Заказ передан курьеру"
         )
         await message.answer(client_message)
 
-        courier = await rq.get_courier()
-        if courier:
-            courier_delivery = await sync_to_async(
-                CourierDelivery.objects.create)(
-                    courier=courier, order=new_order
+        try:
+            # Назначение курьера
+            courier = await rq.get_courier()
+            if not courier:
+                await message.answer("❌ Нет доступных курьеров.")
+                return
+
+            try:
+                # Создание записи о доставке
+                courier_delivery = await sync_to_async(CourierDelivery.objects.create)(
+                    courier=courier, 
+                    order=new_order
                 )
+            except IntegrityError as e:
+                logger.error("Ошибка создания доставки: %s", e)
+                await message.answer("❌ Ошибка при создании заказа.")
+                return
 
+            # Отправка уведомления курьеру
             courier_keyboard = create_courier_keyboard(courier_delivery.id)
-
             courier_message = (
                 f">>>>{courier.name}\n"
                 "🚨 Новый заказ!\n"
                 f"🔢 Номер заказа: #{new_order.id}\n"
                 f"📦 Адрес: {new_order.address}\n"
-                f"📅 Дата: {user_data['delivery_date']}\n"
-                f"⏰ Время: {user_data['delivery_time'].strftime('%H:%M')}\n"
+                f"📅 Дата: {delivery_date}\n"
+                f"⏰ Время: {delivery_time}\n"
                 f"👤 Клиент: {new_order.name}\n"
             )
+            
+            try:
+                await message.bot.send_message(
+                    chat_id=courier.tg_id,
+                    text=courier_message,
+                    reply_markup=courier_keyboard
+                )
+            except TelegramBadRequest as e:
+                logger.error("Ошибка отправки сообщения курьеру: %s", e)
 
-            await message.bot.send_message(
-                chat_id=courier.tg_id,
-                text=courier_message,
-                reply_markup=courier_keyboard
-            )
-        else:
-            await message.answer("Не удалось получить информацию о курьере.")
+        except Exception as e:
+            logger.error("Ошибка назначения курьера: %s", e)
+            await message.answer("❌ Ошибка при обработке заказа.")
 
-    except AttributeError as e:
-        raise e
-    await sync_to_async(FSMData.objects.filter(user_id=message.from_user.id).delete)()
-    await state.clear()
+        # Очистка данных
+        await sync_to_async(FSMData.objects.filter(
+            user_id=message.from_user.id
+        ).delete)()
+        await state.clear()
 
+    except KeyError as e:
+        logger.error("Отсутствует ключ в данных: %s", e)
+        await message.answer("❌ Ошибка данных заказа.")
+    except ValueError as e:
+        logger.error("Ошибка создания заказа: %s", e)
+        await message.answer("❌ Ошибка при создании заказа.")
+    except Exception as e:
+        logger.error("Неизвестная ошибка: %s", exc_info=True)
+        await message.answer("❌ Критическая ошибка. Обратитесь в поддержку.")
 
 @router.callback_query(F.data.startswith("delivered_"))
 async def process_delivered(callback: CallbackQuery) -> None:
@@ -797,7 +1048,10 @@ async def consultation_1(message: Message, state: FSMContext) -> None:
     """
     await state.set_state(OrderState.waiting_consultation)
     await save_fsm_data(message.from_user.id, state)
-    await message.answer("Укажите номер телефона, и наш флорист перезвонит вам в течение 20 минут")
+    await message.answer(
+        "📞 Укажите номер телефона (пример: +79161234567 или 89161234567),"
+        "и наш флорист перезвонит вам в течение 20 минут"
+    )
     await state.set_state(OrderState.waiting_for_phone)
 
 
@@ -812,16 +1066,18 @@ async def consultation(message: Message, state: FSMContext) -> None:
     await save_fsm_data(message.from_user.id, state)
     phone = message.text.strip()
 
-    if not re.match(r"^\+7\d{10}$|^8\d{10}$", phone):
-        await message.answer("Номер введён некорректно, введите номер в формате +79199209292")
+    if not re.match(r"^(\+7|8)[\d\- ]{10,}$", phone):
+        await message.answer("Номер введён некорректно, "
+                             "введите номер в формате +79161234567 или 89161234567"
+                             )
         return
 
     await state.update_data(phone=phone)
 
     await message.answer(
-        f'Ваш номер телефоне - {phone}\n'
+        f'📞 Ваш номер телефоне - {phone}\n'
         f'Подтвердите его!',
-        reply_markup=confirm_phone_keyboard()
+        reply_markup=await confirm_phone_keyboard()
         )
 
     await state.set_state(OrderState.confrim_for_phone)
@@ -835,39 +1091,46 @@ async def confirm_phone(callback: CallbackQuery, state: FSMContext) -> None:
         callback (CallbackQuery): Callback-запрос от пользователя.
         state (FSMContext): Контекст состояния.
     """
-    confirm_data = await state.get_data()
-    phone = confirm_data.get('phone')   
+    try:
+        confirm_data = await state.get_data()
+        phone = confirm_data.get('phone')   
 
-    await callback.message.answer(
-        f'Ваш номер - {phone} \n'
-        f'Наш флорист перезвонит вам в течение 20 минут'
-    )
-    florist = await sync_to_async(Florist.objects.filter(status='active').first)()
-    if florist:
-
-        florist_callback = await sync_to_async(
-            FloristCallback.objects.create)(
-                phone_number=phone,
-                needs_callback=True,
-                order=None,
-                florist=florist
+        await callback.message.answer(
+            f'📞 Ваш номер - {phone} \n'
+            f'👤 Наш флорист перезвонит вам в течение 20 минут'
         )
+        try:
+            florist = await sync_to_async(Florist.objects.filter(status='active').first)()
+            if florist:
 
-        florist_keyboard = create_florist_keyboard(florist_callback.id)
+                florist_callback = await sync_to_async(
+                    FloristCallback.objects.create)(
+                        phone_number=phone,
+                        needs_callback=True,
+                        order=None,
+                        florist=florist
+                )
 
-        flourist_message = (
-            "Звонок клиенту:\n"
-            "🚨 Требуется консультация клиенту\n"
-            f"🔢 Номер тел: #{phone}"
-        )
+                florist_keyboard = create_florist_keyboard(florist_callback.id)
 
-        await callback.bot.send_message(
-            chat_id=florist.tg_id,
-            text=flourist_message,
-            reply_markup=florist_keyboard
-        )
-    else:
-        await callback.message.answer("К сожалению, в данный момент нет доступных флористов.")
+                flourist_message = (
+                    "Звонок клиенту:\n"
+                    "🚨 Требуется консультация клиенту\n"
+                    f"🔢 Номер тел: #{phone}"
+                )
+
+                await callback.bot.send_message(
+                    chat_id=florist.tg_id,
+                    text=flourist_message,
+                    reply_markup=florist_keyboard
+                )
+            else:
+                await callback.message.answer("К сожалению, в данный момент нет доступных флористов.")
+        except IntegrityError:
+            await callback.message.answer("❌ Ошибка при создании заявки!")
+    except Exception as e:
+        logger.error(f"Ошибка подтверждения телефона: {str(e)}")
+        await callback.message.answer("❌ Ошибка при обработке запроса!")
 
 
 @router.callback_query(F.data.startswith("call_made_"))
@@ -877,11 +1140,19 @@ async def process_call_made(callback: CallbackQuery) -> None:
     Args:
         callback (CallbackQuery): Callback-запрос от пользователя.
     """
-    florist_callback_id = int(callback.data.split("_")[2])
-    florist_callback = await sync_to_async(FloristCallback.objects.get)(id=florist_callback_id)
-    florist_callback.callback_made = True
-    await sync_to_async(florist_callback.save)()
-    await callback.message.answer("✅ Отмечено как перезвонивший!")
+    try:
+        florist_callback_id = int(callback.data.split("_")[2])
+        florist_callback = await sync_to_async(FloristCallback.objects.get)(
+            id=florist_callback_id
+        )
+        florist_callback.callback_made = True
+        await sync_to_async(florist_callback.save)()
+        await callback.message.answer("✅ Отмечено как перезвонивший!")
+    except ObjectDoesNotExist:
+        await callback.answer("❌ Запрос на звонок не найден!")
+    except Exception as e:
+        logger.error(f"Ошибка обработки звонка: {str(e)}")
+        await callback.answer("❌ Ошибка при обновлении статуса!")
 
 
 @router.callback_query(F.data == 'edit_phone', OrderState.confrim_for_phone)
@@ -978,7 +1249,7 @@ async def handle_pagination(callback: CallbackQuery, state: FSMContext) -> None:
         f"{page_info}\nВсе букеты по выбранному событию:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=(
-                keyboard.inline_keyboard + 
+                keyboard.inline_keyboard +
                 navigation_buttons.inline_keyboard
             )
         )
